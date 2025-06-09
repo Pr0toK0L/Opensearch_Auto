@@ -280,13 +280,13 @@ automated_config() {
     echo "Configuring OpenSearch automatically..."
     
     # Backup original config
-    if [ -f "$CONFIG_DIR/config/opensearch.yml" ]; then
-        sudo cp "$CONFIG_DIR/config/opensearch.yml" "$CONFIG_DIR/config/opensearch.yml.bak"
+    if [ -f "$CONFIG_DIR/opensearch.yml" ]; then
+        sudo cp "$CONFIG_DIR/opensearch.yml" "$CONFIG_DIR/opensearch.yml.bak"
         echo "Backup created: opensearch.yml.bak"
     fi
     
     # Config network
-    sudo tee "$CONFIG_DIR/config/opensearch.yml" > /dev/null << 'EOF'
+    sudo tee "$CONFIG_DIR/opensearch.yml" > /dev/null << 'EOF'
 network.host: 0.0.0.0
 http.port: 9200
 path.data: /var/lib/opensearch
@@ -348,7 +348,7 @@ EOF
     sudo chown opensearch:opensearch ./*.pem 2>/dev/null || true
 
     # Add SSL configuration to opensearch.yml
-    sudo tee -a "$CONFIG_DIR/config/opensearch.yml" > /dev/null << 'EOF'
+    sudo tee -a "$CONFIG_DIR/opensearch.yml" > /dev/null << 'EOF'
 
 # Security Configuration
 plugins.security.ssl.transport.pemcert_filepath: /etc/opensearch/node1.pem
@@ -370,8 +370,8 @@ plugins.security.restapi.roles_enabled: ["all_access", "security_rest_api_access
 EOF
 
     # Verify configuration was updated
-    if [ -f "$CONFIG_DIR/config/opensearch.yml.bak" ]; then
-        if ! diff "$CONFIG_DIR/config/opensearch.yml.bak" "$CONFIG_DIR/config/opensearch.yml" > /dev/null; then
+    if [ -f "$CONFIG_DIR/opensearch.yml.bak" ]; then
+        if ! diff "$CONFIG_DIR/opensearch.yml.bak" "$CONFIG_DIR/opensearch.yml" > /dev/null; then
             echo "Security configuration has been updated successfully"
         else
             echo "Error: Failed to update security configuration"
