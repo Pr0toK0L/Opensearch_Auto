@@ -240,10 +240,144 @@ install_specific_version() {
     sudo chmod 777 "$DASHBOARDS_DIR"
     sudo chmod 777 "$DASHBOARDS_CONFIG_DIR"
     
+    # Fix installation issues inline
+    echo "Applying installation fixes..."
+    
+    # Fix Java environment
+    local java_home
+    if [ -d "/usr/share/opensearch/jdk" ]; then
+        java_home="/usr/share/opensearch/jdk"
+    elif [ -d "/usr/lib/jvm/java-17-openjdk-amd64" ]; then
+        java_home="/usr/lib/jvm/java-17-openjdk-amd64"
+    elif [ -d "/usr/lib/jvm/java-11-openjdk-amd64" ]; then
+        java_home="/usr/lib/jvm/java-11-openjdk-amd64"
+    else
+        echo "Installing OpenJDK 17..."
+        sudo apt-get update
+        sudo apt-get install -y openjdk-17-jdk
+        java_home="/usr/lib/jvm/java-17-openjdk-amd64"
+    fi
+    
+    # Create environment file
+    sudo tee /etc/default/opensearch > /dev/null << EOF
+OPENSEARCH_JAVA_HOME=$java_home
+OPENSEARCH_PATH_CONF=/etc/opensearch
+ES_PATH_CONF=/etc/opensearch
+OPENSEARCH_HOME=/usr/share/opensearch
+EOF
+    
+    # Fix systemd service file
+    if [ -f "/lib/systemd/system/opensearch.service" ]; then
+        sudo cp /lib/systemd/system/opensearch.service /lib/systemd/system/opensearch.service.bak
+        
+        sudo tee /lib/systemd/system/opensearch.service > /dev/null << 'EOF'
+[Unit]
+Description=OpenSearch
+Documentation=https://opensearch.org/
+Wants=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/etc/opensearch/opensearch.yml
+
+[Service]
+RuntimeDirectory=opensearch
+PrivateTmp=true
+Environment=OPENSEARCH_HOME=/usr/share/opensearch
+Environment=OPENSEARCH_PATH_CONF=/etc/opensearch
+Environment=PID_DIR=/var/run/opensearch
+Environment=ES_PATH_CONF=/etc/opensearch
+EnvironmentFile=-/etc/default/opensearch
+WorkingDirectory=/usr/share/opensearch
+User=opensearch
+Group=opensearch
+ExecStart=/usr/share/opensearch/bin/opensearch
+StandardOutput=journal
+StandardError=inherit
+SyslogIdentifier=opensearch
+LimitNOFILE=65535
+LimitNPROC=4096
+LimitAS=infinity
+LimitFSIZE=infinity
+TimeoutStopSec=0
+KillSignal=SIGTERM
+KillMode=process
+SendSIGKILL=no
+SuccessExitStatus=143
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+    
+    # Fix JVM options - only fix GC logging path, keep existing heap settings
+    if [ -f "$CONFIG_DIR/jvm.options" ]; then
+        # Backup original jvm.options
+        sudo cp "$CONFIG_DIR/jvm.options" "$CONFIG_DIR/jvm.options.original"
+        
+        # Fix GC logging path from absolute to relative
+        sudo sed -i 's|-Xlog:gc\*,gc+age=trace,safepoint:file=/var/log/opensearch/gc.log|-Xlog:gc*,gc+age=trace,safepoint:gc.log|g' "$CONFIG_DIR/jvm.options"
+        
+        echo "Fixed GC logging path in jvm.options"
+    fi
+    
+    # Reload systemd
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed opensearch 2>/dev/null || true
+    
+    # Make sure opensearch script is executable
+    sudo chmod +x /usr/share/opensearch/bin/opensearch
+    
+    # Fix OpenSearch Dashboards systemd service if exists
+    if [ -f "/lib/systemd/system/opensearch-dashboards.service" ]; then
+        sudo cp /lib/systemd/system/opensearch-dashboards.service /lib/systemd/system/opensearch-dashboards.service.bak
+        
+        sudo tee /lib/systemd/system/opensearch-dashboards.service > /dev/null << 'EOF'
+[Unit]
+Description=OpenSearch Dashboards
+Documentation=https://opensearch.org/
+Wants=network-online.target
+After=network-online.target opensearch.service
+ConditionFileNotEmpty=/etc/opensearch-dashboards/opensearch_dashboards.yml
+
+[Service]
+RuntimeDirectory=opensearch-dashboards
+PrivateTmp=true
+Environment=NODE_OPTIONS="--max-old-space-size=4096"
+WorkingDirectory=/usr/share/opensearch-dashboards
+User=opensearch-dashboards
+Group=opensearch-dashboards
+ExecStart=/usr/share/opensearch-dashboards/bin/opensearch-dashboards
+StandardOutput=journal
+StandardError=inherit
+SyslogIdentifier=opensearch-dashboards
+LimitNOFILE=65535
+LimitNPROC=4096
+TimeoutStopSec=0
+KillSignal=SIGTERM
+KillMode=process
+SendSIGKILL=no
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        # Make sure opensearch-dashboards script is executable
+        sudo chmod +x /usr/share/opensearch-dashboards/bin/opensearch-dashboards
+    fi
+    
+    echo "Installation fixes applied successfully"
+    
     echo "OpenSearch $version has been installed successfully in $INSTALL_DIR, configuration in $CONFIG_DIR"
     if [ -n "$admin_password" ]; then
         echo "Admin password has been set. Please keep it safe."
     fi
+    
+    echo ""
+    echo "Next steps:"
+    echo "- Run with -a flag for automated configuration"
+    echo "- Run with -s flag to start services"
+    echo "- Or configure manually before starting"
 }
 
 install_latest_version() {

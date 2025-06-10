@@ -154,6 +154,16 @@ install_specific_version() {
         sudo mkdir -p "$CONFIG_DIR"
     fi
     
+    # Create log directory for OpenSearch
+    if [ ! -d "/var/log/opensearch" ]; then
+        sudo mkdir -p "/var/log/opensearch"
+    fi
+    
+    # Create data directory for OpenSearch
+    if [ ! -d "/var/lib/opensearch" ]; then
+        sudo mkdir -p "/var/lib/opensearch"
+    fi
+    
     # Download install file
     local download_url="https://artifacts.opensearch.org/releases/bundle/opensearch/$version/opensearch-$version-linux-x64.deb"
     local temp_file="/tmp/opensearch-$version-linux-x64.deb"
@@ -215,14 +225,18 @@ install_specific_version() {
     rm -f "$temp_file"
     rm -f "$temp_file_dashboards"
 
-    # Set appropriate permissions
+    # Set appropriate permissions for all directories
     sudo chown -R opensearch:opensearch "$INSTALL_DIR" 2>/dev/null || true
     sudo chown -R opensearch:opensearch "$CONFIG_DIR" 2>/dev/null || true
+    sudo chown -R opensearch:opensearch "/var/log/opensearch" 2>/dev/null || true
+    sudo chown -R opensearch:opensearch "/var/lib/opensearch" 2>/dev/null || true
     sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_DIR" 2>/dev/null || true
     sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_CONFIG_DIR" 2>/dev/null || true
     
     sudo chmod 777 "$INSTALL_DIR"
     sudo chmod 777 "$CONFIG_DIR"
+    sudo chmod 777 "/var/log/opensearch"
+    sudo chmod 777 "/var/lib/opensearch"
     sudo chmod 777 "$DASHBOARDS_DIR"
     sudo chmod 777 "$DASHBOARDS_CONFIG_DIR"
     
