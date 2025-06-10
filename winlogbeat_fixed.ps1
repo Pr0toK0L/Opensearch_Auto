@@ -1,452 +1,480 @@
-#Requires -RunAsAdministrator
+#!/bin/bash
 
-param (
-    [switch]$i, # Install
-    [string]$v, # Version in format x.x.x
-    [switch]$l, # Latest version
-    [switch]$a, # Automated config
-    [switch]$s  # Start winlogbeat
-)
+# Menu options:
+# -i : install
+# -v : version
+# -l : latest version
+# -a : automated config
+# -s : start opensearch
 
-# Variables
-$WinlogbeatVersion = ""
-$Install = $i
-$InstallLatest = $l
-$AutomatedConfig = $a
-$Start = $s
-$InstallDir = "C:\Program Files\Winlogbeat"
-$ConfigDir = "C:\ProgramData\Winlogbeat"
+OPENSEARCH_VERSION=""
+INSTALL=false
+INSTALL_LATEST=false
+AUTOMATED_CONFIG=false
+START=false
 
-function Get-WinlogbeatVersion {
-    try {
-        $winlogbeatExe = Join-Path $InstallDir "winlogbeat.exe"
-        if (-not (Test-Path $winlogbeatExe)) {
-            throw "winlogbeat.exe not found"
-        }
-        
-        # Change to installation directory
-        $currentLocation = Get-Location
-        Set-Location $InstallDir
-        
-        try {
-            # Get version information
-            $versionOutput = & ".\winlogbeat.exe" version 2>$null
-            if ($versionOutput -match 'winlogbeat version (\d+\.\d+\.\d+)') {
-                return $matches[1]
-            } else {
-                # Fallback: try to extract from file properties
-                $fileInfo = Get-ItemProperty -Path $winlogbeatExe
-                if ($fileInfo.VersionInfo.ProductVersion) {
-                    $version = $fileInfo.VersionInfo.ProductVersion -replace '[^\d\.].*$', ''
-                    return $version
-                } else {
-                    throw "Could not determine version"
-                }
-            }
-        } finally {
-            Set-Location $currentLocation
-        }
-    } catch {
-        Write-Host "Warning: Could not determine Winlogbeat version, assuming latest (>= 8.x)"
-        return "8.0.0"  # Default to newer version command
-    }
+validate_version() {
+    local version=$1
+    # Check version format
+    if ! [[ $version =~ ^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
+        echo "Error: Version must be in format x.x.x where x is a number from 0-99"
+        show_help
+        exit 1
+    fi
+    
+    # Split version into parts
+    IFS='.' read -r -a version_parts <<< "$version"
+    
+    # Check each part is between 0 and 99
+    for part in "${version_parts[@]}"; do
+        if [ "$part" -lt 0 ] || [ "$part" -gt 99 ]; then
+            echo "Error: Each version number must be between 0 and 99"
+            show_help
+            exit 1
+        fi
+    done
 }
 
-function Show-Help {
-    Write-Host "Usage: .\Install-Winlogbeat.ps1 [-i] [-v version] [-l] [-a] [-s]"
-    Write-Host "  -i : Install Winlogbeat"
-    Write-Host "  -v : Version in format x.x.x, x in 0-99"
-    Write-Host "  -l : Install latest version"
-    Write-Host "  -a : Automated configuration (not recommended)"
-    Write-Host "  -s : Start Winlogbeat service"
-    Write-Host "Example:"
-    Write-Host ".\Install-Winlogbeat.ps1 -i -l : Install latest version with no config"
-    exit 1
+show_help() {
+    echo "Usage: $0 [-i] [-v VERSION] [-l] [-a] [-s]"
+    echo "  -i : install"
+    echo "  -v : version in format x.x.x, x in 0-99"
+    echo "  -l : install latest version"
+    echo "  -a : automated config (not recommended)"
+    echo "  -s : start opensearch"
+    echo "Example:" 
+    echo "$0 -i -l : install latest version with no config"
+    echo "$0 -i -v 2.12.0 : install specific version"
 }
 
-function Test-Version {
-    param ([string]$version)
-    if (-not ($version -match '^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}$')) {
-        Write-Host "Error: Version must be in format x.x.x where x is a number from 0-99"
-        Show-Help
-    }
-    $versionParts = $version -split '\.'
-    foreach ($part in $versionParts) {
-        if ([int]$part -lt 0 -or [int]$part -gt 99) {
-            Write-Host "Error: Each version number must be between 0 and 99"
-            Show-Help
-        }
-    }
+check_root() {
+    if [ $EUID -ne 0 ]; then
+        echo "This script must be run as root"
+        exit 1
+    fi
 }
 
-# Validate options
-if ($v -and $InstallLatest) {
-    Write-Host "Error: Cannot use -v and -l options together"
-    Show-Help
+check_sudo() {
+    if ! sudo -v; then
+        echo "Error: Cannot get sudo privileges"
+        exit 1
+    fi
 }
 
-if ($v) {
-    Test-Version $v
-    $WinlogbeatVersion = $v
-}
+# Get options menu
+while getopts ":iv:las" opt; do
+    case ${opt} in
+        i ) 
+            INSTALL=true
+            ;;
+        v ) 
+            if [ "$INSTALL_LATEST" = true ]; then
+                echo "Error: Cannot use -v and -l options together"
+                show_help
+                exit 1
+            fi
+            validate_version "$OPTARG"
+            OPENSEARCH_VERSION="$OPTARG"
+            ;;
+        l ) 
+            if [ -n "$OPENSEARCH_VERSION" ]; then
+                echo "Error: Cannot use -l and -v options together"
+                show_help
+                exit 1
+            fi
+            INSTALL_LATEST=true
+            ;;
+        a ) 
+            AUTOMATED_CONFIG=true
+            ;;
+        s ) 
+            START=true
+            ;;
+        \? )
+            echo "Error: Invalid option -$OPTARG"
+            show_help
+            exit 1
+            ;;
+        : )
+            echo "Error: Option -$OPTARG requires an argument"
+            show_help
+            exit 1
+            ;;
+    esac
+done
 
-# Check if running as Administrator
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "This script must be run as Administrator"
-    exit 1
-}
+# Check if install option is provided when other options are used
+if [ "$INSTALL" = false ] && ([ "$AUTOMATED_CONFIG" = true ] || [ "$START" = true ]); then
+    if [ "$START" = true ] && [ ! -d "/usr/share/opensearch" ]; then
+        echo "Error: OpenSearch is not installed. Use -i option to install first."
+        exit 1
+    fi
+fi
 
-function Install-SpecificVersion {
-    param ([string]$version)
-    Write-Host "Installing Winlogbeat version $version..."
+# Check root privileges for installation
+if [ "$INSTALL" = true ]; then
+    check_root
+fi
 
-    # Stop existing service if running
-    $service = Get-Service -Name "winlogbeat" -ErrorAction SilentlyContinue
-    if ($service -and $service.Status -eq 'Running') {
-        Write-Host "Stopping existing Winlogbeat service..."
-        Stop-Service -Name "winlogbeat" -Force
-    }
+set -e
 
+INSTALL_DIR="/usr/share/opensearch"
+CONFIG_DIR="/etc/opensearch"
+DASHBOARDS_DIR="/usr/share/opensearch-dashboards"
+DASHBOARDS_CONFIG_DIR="/etc/opensearch-dashboards"
+
+install_specific_version() {
+    local version=$1
+    echo "Installing OpenSearch version $version..."
+    
+    # Check version to require admin password
+    local major_version=$(echo $version | cut -d'.' -f1)
+    local minor_version=$(echo $version | cut -d'.' -f2)
+    local admin_password=""
+    
+    if ([ "$major_version" -ge 3 ]) || ([ "$major_version" -eq 2 ] && [ "$minor_version" -ge 12 ]); then
+        # Require admin password for version 2.12 or higher
+        while true; do
+            read -s -p "Enter admin password for OpenSearch (minimum 8 characters): " admin_password
+            echo
+            if [ ${#admin_password} -ge 8 ]; then
+                break
+            else
+                echo "Password must be at least 8 characters long. Please try again."
+            fi
+        done
+    fi
+    
     # Create install directory if it doesn't exist
-    if (-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    }
+    if [ ! -d "$INSTALL_DIR" ]; then
+        sudo mkdir -p "$INSTALL_DIR"
+    fi
+    
+    if [ ! -d "$CONFIG_DIR" ]; then
+        sudo mkdir -p "$CONFIG_DIR"
+    fi
+    
+    # Download install file
+    local download_url="https://artifacts.opensearch.org/releases/bundle/opensearch/$version/opensearch-$version-linux-x64.deb"
+    local temp_file="/tmp/opensearch-$version-linux-x64.deb"
 
-    # Download Winlogbeat
-    $downloadUrl = "https://artifacts.elastic.co/downloads/beats/winlogbeat/winlogbeat-$version-windows-x86_64.zip"
-    $tempFile = "$env:TEMP\winlogbeat-$version-windows-x86_64.zip"
-
-    Write-Host "Downloading Winlogbeat $version from $downloadUrl..."
-    try {
-        # Test if URL exists first
-        $response = Invoke-WebRequest -Uri $downloadUrl -Method Head -ErrorAction Stop
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -ErrorAction Stop
-        Write-Host "Download completed successfully"
-    } catch {
-        Write-Host "Error: Failed to download Winlogbeat $version. Please check if version exists."
-        Write-Host "Available versions can be found at: https://www.elastic.co/downloads/past-releases#winlogbeat"
-        Remove-Item $tempFile -ErrorAction SilentlyContinue
+    local download_url_dashboards="https://artifacts.opensearch.org/releases/bundle/opensearch-dashboards/$version/opensearch-dashboards-$version-linux-x64.deb"
+    local temp_file_dashboards="/tmp/opensearch-dashboards-$version-linux-x64.deb"
+    
+    echo "Downloading OpenSearch $version..."
+    if ! wget -q "$download_url" -O "$temp_file"; then
+        echo "Error: Failed to download OpenSearch $version"
+        echo "Please check if the version exists at: $download_url"
         exit 1
-    }
+    fi
+    
+    echo "Installing OpenSearch..."
+    if [ -n "$admin_password" ]; then
+        # Export the environment variable and use sudo -E to preserve it
+        export OPENSEARCH_INITIAL_ADMIN_PASSWORD="$admin_password"
+        if ! sudo -E dpkg -i "$temp_file"; then
+            echo "Error: Failed to install OpenSearch"
+            echo "Attempting to fix dependencies..."
+            sudo apt-get install -f -y
+            sudo -E dpkg -i "$temp_file"
+        fi
+    else
+        if ! sudo dpkg -i "$temp_file"; then
+            echo "Error: Failed to install OpenSearch"
+            echo "Attempting to fix dependencies..."
+            sudo apt-get install -f -y
+            sudo dpkg -i "$temp_file"
+        fi
+    fi
 
-    # Extract Winlogbeat
-    Write-Host "Extracting Winlogbeat..."
-    try {
-        # Remove existing files first
-        Get-ChildItem -Path $InstallDir -Exclude "data", "logs" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-        
-        Expand-Archive -Path $tempFile -DestinationPath $env:TEMP -Force -ErrorAction Stop
-        $extractedFolder = Join-Path $env:TEMP "winlogbeat-$version-windows-x86_64"
-        
-        if (Test-Path $extractedFolder) {
-            Get-ChildItem -Path $extractedFolder | Copy-Item -Destination $InstallDir -Recurse -Force
-            Remove-Item $extractedFolder -Recurse -Force
-        } else {
-            throw "Extracted folder not found"
-        }
-    } catch {
-        Write-Host "Error: Failed to extract Winlogbeat - $_"
-        Remove-Item $tempFile -ErrorAction SilentlyContinue
+    echo "Downloading OpenSearch Dashboards $version..."
+    if ! wget -q "$download_url_dashboards" -O "$temp_file_dashboards"; then
+        echo "Error: Failed to download OpenSearch Dashboards $version"
         exit 1
-    }
+    fi
+    
+    echo "Installing OpenSearch Dashboards..."
+    if ! sudo dpkg -i "$temp_file_dashboards"; then
+        echo "Error: Failed to install OpenSearch Dashboards"
+        echo "Attempting to fix dependencies..."
+        sudo apt-get install -f -y
+        sudo dpkg -i "$temp_file_dashboards"
+    fi
+    
+    # Delete temporary files
+    rm -f "$temp_file"
+    rm -f "$temp_file_dashboards"
 
-    # Clean up
-    Remove-Item $tempFile -ErrorAction SilentlyContinue
-
-    # Set permissions
-    try {
-        icacls $InstallDir /grant "Everyone:(OI)(CI)F" /T | Out-Null
-        if (Test-Path $ConfigDir) {
-            icacls $ConfigDir /grant "Everyone:(OI)(CI)F" /T | Out-Null
-        }
-    } catch {
-        Write-Host "Warning: Failed to set permissions"
-    }
-
-    Write-Host "Winlogbeat $version has been installed successfully in $InstallDir"
+    # Set appropriate permissions
+    sudo chown -R opensearch:opensearch "$INSTALL_DIR" 2>/dev/null || true
+    sudo chown -R opensearch:opensearch "$CONFIG_DIR" 2>/dev/null || true
+    sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_DIR" 2>/dev/null || true
+    sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_CONFIG_DIR" 2>/dev/null || true
+    
+    sudo chmod 777 "$INSTALL_DIR"
+    sudo chmod 777 "$CONFIG_DIR"
+    sudo chmod 777 "$DASHBOARDS_DIR"
+    sudo chmod 777 "$DASHBOARDS_CONFIG_DIR"
+    
+    echo "OpenSearch $version has been installed successfully in $INSTALL_DIR, configuration in $CONFIG_DIR"
+    if [ -n "$admin_password" ]; then
+        echo "Admin password has been set. Please keep it safe."
+    fi
 }
 
-function Install-LatestVersion {
-    Write-Host "Fetching latest version information..."
-    try {
-        $response = Invoke-WebRequest -Uri "https://www.elastic.co/downloads/past-releases#winlogbeat" -UseBasicParsing -ErrorAction Stop
-        
-        # Updated regex pattern based on the page content structure
-        $versionMatches = $response.Content | Select-String -Pattern 'Winlogbeat (\d+\.\d+\.\d+)' -AllMatches
-        
-        if ($versionMatches.Matches.Count -eq 0) {
-            # Fallback: try OSS version pattern
-            $versionMatches = $response.Content | Select-String -Pattern 'Winlogbeat OSS (\d+\.\d+\.\d+)' -AllMatches
-        }
-        
-        if ($versionMatches.Matches.Count -eq 0) {
-            Write-Host "Error: Could not find Winlogbeat versions on the page"
-            Write-Host "Please visit https://www.elastic.co/downloads/past-releases#winlogbeat to check available versions"
+install_latest_version() {
+    echo "Getting latest OpenSearch version..."
+    
+    # Try to get latest version from GitHub releases API
+    local version
+    version=$(curl -s "https://api.github.com/repos/opensearch-project/OpenSearch/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/' 2>/dev/null)
+    
+    if [ -z "$version" ] || [ "$version" = "null" ]; then
+        echo "Warning: Could not automatically detect latest version"
+        echo "Using fallback version 2.12.0"
+        version="2.12.0"
+    fi
+    
+    echo "Latest version detected: $version"
+    install_specific_version "$version"
+}
+
+start_opensearch() {
+    if [ ! -d "$INSTALL_DIR" ]; then
+        echo "Error: OpenSearch is not installed in $INSTALL_DIR"
+        exit 1
+    fi
+
+    echo "Starting OpenSearch..."
+    sudo systemctl enable opensearch
+    sudo systemctl start opensearch
+    
+    # Wait a moment for service to start
+    sleep 5
+    
+    if sudo systemctl is-active --quiet opensearch; then
+        echo "OpenSearch service started successfully"
+        sudo systemctl status opensearch --no-pager
+    else
+        echo "Error: OpenSearch service failed to start"
+        sudo systemctl status opensearch --no-pager
+        exit 1
+    fi
+
+    echo "Starting OpenSearch Dashboards..."
+    sudo systemctl enable opensearch-dashboards
+    sudo systemctl start opensearch-dashboards
+    
+    # Wait a moment for service to start
+    sleep 5
+    
+    if sudo systemctl is-active --quiet opensearch-dashboards; then
+        echo "OpenSearch Dashboards service started successfully"
+        sudo systemctl status opensearch-dashboards --no-pager
+    else
+        echo "Warning: OpenSearch Dashboards service may have failed to start"
+        sudo systemctl status opensearch-dashboards --no-pager
+    fi
+}
+
+automated_config() {
+    echo "Configuring OpenSearch automatically..."
+    
+    # Backup original config
+    if [ -f "$CONFIG_DIR/opensearch.yml" ]; then
+        sudo cp "$CONFIG_DIR/opensearch.yml" "$CONFIG_DIR/opensearch.yml.bak"
+        echo "Backup created: opensearch.yml.bak"
+    fi
+    
+    # Config network
+    sudo tee "$CONFIG_DIR/opensearch.yml" > /dev/null << 'EOF'
+network.host: 0.0.0.0
+http.port: 9200
+path.data: /var/lib/opensearch
+path.logs: /var/log/opensearch
+discovery.type: single-node
+plugins.security.disabled: false
+EOF
+    
+    # Config JVM heap sizes
+    echo "JVM Heap Size Configuration"
+    echo "As a starting point, you should set these values to half of the available system memory."
+    echo "For dedicated hosts this value can be increased based on your workflow requirements."
+    echo "Example: if the host machine has 8 GB of memory, set heap sizes to 4 GB"
+    
+    local heap_size
+    while true; do
+        read -p "Enter JVM heap size in GB (integer, e.g., 4): " heap_size
+        if [[ "$heap_size" =~ ^[0-9]+$ ]] && [ "$heap_size" -gt 0 ]; then
+            break
+        else
+            echo "Please enter a valid positive integer"
+        fi
+    done
+    
+    echo "Setting initial and maximum JVM heap size to: ${heap_size}GB"
+    sudo tee "$CONFIG_DIR/jvm.options" > /dev/null << EOF
+-Xms${heap_size}g
+-Xmx${heap_size}g
+EOF
+    
+    # Config SSL certificates
+    echo "Generating SSL certificates..."
+    cd "$CONFIG_DIR"
+    
+    # Remove existing certificates
+    sudo rm -f ./*.pem ./*.csr ./*.ext
+    
+    # Generate root CA
+    sudo openssl genrsa -out root-ca-key.pem 2048
+    sudo openssl req -new -x509 -sha256 -key root-ca-key.pem -subj "/C=CA/ST=ONTARIO/L=TORONTO/O=ORG/OU=UNIT/CN=ROOT" -out root-ca.pem -days 730
+
+    # Generate admin certificate
+    sudo openssl genrsa -out admin-key-temp.pem 2048
+    sudo openssl pkcs8 -inform PEM -outform PEM -in admin-key-temp.pem -topk8 -nocrypt -v1 PBE-SHA1-3DES -out admin-key.pem
+    sudo openssl req -new -key admin-key.pem -subj "/C=CA/ST=ONTARIO/L=TORONTO/O=ORG/OU=UNIT/CN=A" -out admin.csr
+    sudo openssl x509 -req -in admin.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial -sha256 -out admin.pem -days 730
+
+    # Generate node certificate
+    sudo openssl genrsa -out node1-key-temp.pem 2048
+    sudo openssl pkcs8 -inform PEM -outform PEM -in node1-key-temp.pem -topk8 -nocrypt -v1 PBE-SHA1-3DES -out node1-key.pem
+    sudo openssl req -new -key node1-key.pem -subj "/C=CA/ST=ONTARIO/L=TORONTO/O=ORG/OU=UNIT/CN=node1.dns.a-record" -out node1.csr
+    sudo sh -c 'echo subjectAltName=DNS:node1.dns.a-record > node1.ext'
+    sudo openssl x509 -req -in node1.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial -sha256 -out node1.pem -days 730 -extfile node1.ext
+    
+    # Clean up temporary files
+    sudo rm -f ./*temp.pem ./*.csr ./*.ext
+    
+    # Set proper ownership
+    sudo chown opensearch:opensearch ./*.pem 2>/dev/null || true
+
+    # Add SSL configuration to opensearch.yml
+    sudo tee -a "$CONFIG_DIR/opensearch.yml" > /dev/null << 'EOF'
+
+# Security Configuration
+plugins.security.ssl.transport.pemcert_filepath: /etc/opensearch/node1.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/opensearch/node1-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/opensearch/root-ca.pem
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /etc/opensearch/node1.pem
+plugins.security.ssl.http.pemkey_filepath: /etc/opensearch/node1-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /etc/opensearch/root-ca.pem
+plugins.security.allow_default_init_securityindex: true
+plugins.security.authcz.admin_dn:
+  - 'CN=A,OU=UNIT,O=ORG,L=TORONTO,ST=ONTARIO,C=CA'
+plugins.security.nodes_dn:
+  - 'CN=node1.dns.a-record,OU=UNIT,O=ORG,L=TORONTO,ST=ONTARIO,C=CA'
+plugins.security.audit.type: internal_opensearch
+plugins.security.enable_snapshot_restore_privilege: true
+plugins.security.check_snapshot_restore_write_privileges: true
+plugins.security.restapi.roles_enabled: ["all_access", "security_rest_api_access"]
+EOF
+
+    # Verify configuration was updated
+    if [ -f "$CONFIG_DIR/opensearch.yml.bak" ]; then
+        if ! diff "$CONFIG_DIR/opensearch.yml.bak" "$CONFIG_DIR/opensearch.yml" > /dev/null; then
+            echo "Security configuration has been updated successfully"
+        else
+            echo "Error: Failed to update security configuration"
             exit 1
-        }
+        fi
+    fi
+
+    # Configure internal users
+    echo "Configuring OpenSearch users and roles..."
+    
+    if [ -d "$INSTALL_DIR/plugins/opensearch-security/tools" ]; then
+        cd "$INSTALL_DIR/plugins/opensearch-security/tools"
         
-        # Extract and sort versions
-        $versions = $versionMatches.Matches | ForEach-Object { $_.Groups[1].Value } | 
-                    Sort-Object -Unique | 
-                    Sort-Object { [version]$_ } -Descending
+        local admin_password
+        while true; do
+            read -s -p "Enter new admin password (minimum 8 characters): " admin_password
+            echo
+            if [ ${#admin_password} -ge 8 ]; then
+                break
+            else
+                echo "Password must be at least 8 characters long. Please try again."
+            fi
+        done
         
-        $latestVersion = $versions | Select-Object -First 1
-        Write-Host "Latest version found: $latestVersion"
-        Install-SpecificVersion $latestVersion
-    } catch {
-        Write-Host "Error: Failed to fetch version information - $_"
-        Write-Host "Please check your internet connection or specify a version manually with -v"
+        # Generate password hash
+        local admin_hash
+        admin_hash=$(OPENSEARCH_JAVA_HOME=/usr/share/opensearch/jdk ./hash.sh <<< "$admin_password" 2>/dev/null | tail -n 1)
+        
+        if [ -n "$admin_hash" ]; then
+            # Backup original internal_users.yml
+            if [ -f "$CONFIG_DIR/opensearch-security/internal_users.yml" ]; then
+                sudo cp "$CONFIG_DIR/opensearch-security/internal_users.yml" "$CONFIG_DIR/opensearch-security/internal_users.yml.bak"
+            fi
+            
+            # Add new user
+            sudo tee -a "$CONFIG_DIR/opensearch-security/internal_users.yml" > /dev/null << EOF
+
+# Custom user
+user:
+  hash: "$admin_hash"
+  reserved: false
+  description: "New internal user"
+EOF
+            echo "Internal user 'user' has been configured"
+        else
+            echo "Warning: Failed to generate password hash. Skipping internal user configuration."
+        fi
+    else
+        echo "Warning: OpenSearch security tools not found. Skipping internal user configuration."
+    fi
+    
+    # Config OpenSearch Dashboards
+    echo "Configuring OpenSearch Dashboards..."
+    
+    if [ -f "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml" ]; then
+        sudo cp "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml" "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml.bak"
+    fi
+    
+    sudo tee -a "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml" > /dev/null << 'EOF'
+
+# Server Configuration
+server.host: 0.0.0.0
+server.port: 5601
+opensearch.hosts: ["https://localhost:9200"]
+opensearch.ssl.verificationMode: none
+opensearch.username: admin
+opensearch.password: admin
+EOF
+
+    echo "OpenSearch Dashboards configuration updated"
+    echo "Configuration completed successfully!"
+    echo ""
+    echo "Important notes:"
+    echo "- OpenSearch will be available at: https://localhost:9200"
+    echo "- OpenSearch Dashboards will be available at: http://localhost:5601"
+    echo "- Default credentials: admin/admin (change these after first login)"
+    echo "- SSL certificates have been generated in $CONFIG_DIR"
+    echo "- Configuration backups have been created with .bak extension"
+}
+
+# Main execution logic
+if [ "$INSTALL" = true ]; then
+    if [ -n "$OPENSEARCH_VERSION" ]; then
+        install_specific_version "$OPENSEARCH_VERSION"
+    elif [ "$INSTALL_LATEST" = true ]; then
+        install_latest_version
+    else
+        echo "Error: Please specify either -v VERSION or -l option with -i"
+        show_help
         exit 1
-    }
-}
+    fi
+fi
 
-function Start-Winlogbeat {
-    Write-Host "Starting Winlogbeat service..."
-    try {
-        # Check if winlogbeat.exe exists
-        $winlogbeatExe = Join-Path $InstallDir "winlogbeat.exe"
-        if (-not (Test-Path $winlogbeatExe)) {
-            Write-Host "Error: winlogbeat.exe not found in $InstallDir"
-            exit 1
-        }
+if [ "$AUTOMATED_CONFIG" = true ]; then
+    automated_config
+fi
 
-        # Install Winlogbeat as a service if not already installed
-        $service = Get-Service -Name "winlogbeat" -ErrorAction SilentlyContinue
-        if (-not $service) {
-            Write-Host "Installing Winlogbeat as Windows service..."
-            
-            # Determine version to use correct install command
-            $installedVersion = Get-WinlogbeatVersion
-            $majorVersion = [int]($installedVersion -split '\.')[0]
-            
-            Write-Host "Detected Winlogbeat version: $installedVersion (Major: $majorVersion)"
-            
-            # Change to the installation directory
-            $currentLocation = Get-Location
-            Set-Location $InstallDir
-            
-            try {
-                $configFile = Join-Path $ConfigDir "winlogbeat.yml"
-                
-                if ($majorVersion -lt 7) {
-                    # Use very old command for versions < 7.x
-                    Write-Host "Using legacy install command for version < 7.x"
-                    if (Test-Path $configFile) {
-                        Write-Host "Installing service with custom config: $configFile"
-                        & ".\winlogbeat.exe" install-service winlogbeat --path.config="$ConfigDir"
-                    } else {
-                        Write-Host "Installing service with default config"
-                        & ".\winlogbeat.exe" install-service winlogbeat
-                    }
-                } else {
-                    # Use standard install command for versions >= 7.x (including 8.x, 9.x)
-                    Write-Host "Using standard install command for version >= 7.x"
-                    if (Test-Path $configFile) {
-                        Write-Host "Installing service with custom config: $configFile"
-                        & ".\winlogbeat.exe" install --path.config="$ConfigDir"
-                    } else {
-                        Write-Host "Installing service with default config"
-                        & ".\winlogbeat.exe" install
-                    }
-                }
-                
-                # Check if install command was successful
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "Install command failed with exit code: $LASTEXITCODE"
-                    # Try alternative methods
-                    Write-Host "Trying alternative installation methods..."
-                    
-                    # Method 1: Try with -E flag
-                    Write-Host "Trying: winlogbeat.exe install -E path.config=$ConfigDir"
-                    & ".\winlogbeat.exe" install -E "path.config=$ConfigDir"
-                    
-                    if ($LASTEXITCODE -ne 0) {
-                        # Method 2: Try PowerShell service creation
-                        Write-Host "Trying manual service creation..."
-                        $serviceName = "winlogbeat"
-                        $displayName = "Winlogbeat"
-                        $description = "Ship Windows Event Logs to Elasticsearch"
-                        $executablePath = "`"$winlogbeatExe`" -c `"$configFile`" --path.home `"$InstallDir`" --path.config `"$ConfigDir`" --path.data `"C:\ProgramData\Winlogbeat\data`" --path.logs `"C:\ProgramData\Winlogbeat\logs`""
-                        
-                        # Create the service using New-Service
-                        try {
-                            New-Service -Name $serviceName -BinaryPathName $executablePath -DisplayName $displayName -Description $description -StartupType Manual
-                            Write-Host "Service created successfully using PowerShell"
-                        } catch {
-                            Write-Host "PowerShell service creation also failed: $_"
-                            # Method 3: Use sc.exe as last resort
-                            Write-Host "Trying sc.exe as last resort..."
-                            $scResult = & sc.exe create $serviceName binPath= $executablePath DisplayName= $displayName start= demand
-                            Write-Host "sc.exe result: $scResult"
-                        }
-                    }
-                }
-                
-                # Wait a moment for the service to be registered
-                Start-Sleep -Seconds 3
-                
-            } catch {
-                Write-Host "Error installing service: $_"
-                throw $_
-            } finally {
-                # Return to original location
-                Set-Location $currentLocation
-            }
-        }
-        
-        # Verify service exists before starting
-        $service = Get-Service -Name "winlogbeat" -ErrorAction SilentlyContinue
-        if (-not $service) {
-            Write-Host "Error: Winlogbeat service was not installed properly"
-            exit 1
-        }
-        
-        # Start the service
-        Write-Host "Starting Winlogbeat service..."
-        Start-Service -Name "winlogbeat" -ErrorAction Stop
-        Set-Service -Name "winlogbeat" -StartupType Automatic
-        
-        # Wait a moment and check status
-        Start-Sleep -Seconds 3
-        $serviceStatus = Get-Service -Name "winlogbeat" | Select-Object Name, Status, StartType
-        Write-Host "Winlogbeat service status:"
-        $serviceStatus | Format-Table -AutoSize
-        
-        # Additional check for service health
-        if ($serviceStatus.Status -eq 'Running') {
-            Write-Host "Winlogbeat service started successfully"
-        } else {
-            Write-Host "Warning: Winlogbeat service may not be running properly"
-        }
-        
-    } catch {
-        Write-Host "Error: Failed to start Winlogbeat service - $_"
-        Write-Host "You can try starting the service manually with: Start-Service -Name 'winlogbeat'"
-        exit 1
-    }
-}
+if [ "$START" = true ]; then
+    start_opensearch
+fi
 
-function Set-Configuration {
-    Write-Host "Configuring Winlogbeat automatically..."
-    
-    # Create config directory if it doesn't exist
-    if (-not (Test-Path $ConfigDir)) {
-        New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
-    }
-
-    # Basic Winlogbeat configuration
-    $configFile = Join-Path $ConfigDir "winlogbeat.yml"
-    
-    # Create the YAML configuration content
-    $yamlContent = @'
-winlogbeat.event_logs:
-  - name: Application
-    ignore_older: 72h
-
-  - name: System
-
-  - name: Security
-
-  - name: Microsoft-Windows-Sysmon/Operational
-
-  - name: Microsoft-Windows-PowerShell/Operational
-    event_id: 4103, 4104, 4105, 4106
-
-  - name: Windows PowerShell
-    event_id: 400, 403, 600, 800
-
-  - name: ForwardedEvents
-    tags: [forwarded]
-
-setup.template.settings:
-  index.number_of_shards: 1
-  #index.codec: best_compression
-  #_source.enabled: false
-
-output.logstash:
-  # The Logstash hosts
-  hosts: ["192.168.192.146:5044"]
-
-processors:
-  - add_host_metadata:
-      when.not.contains.tags: forwarded
-  - add_cloud_metadata: ~
-
-path.config: ${path.home}
-path.data: C:\ProgramData\Winlogbeat\data
-path.logs: C:\ProgramData\Winlogbeat\logs
-'@
-
-    # Write configuration to file
-    try {
-        Set-Content -Path $configFile -Value $yamlContent -Force -Encoding UTF8
-        Write-Host "Basic configuration written to $configFile"
-    } catch {
-        Write-Host "Error: Failed to write configuration file - $_"
-        exit 1
-    }
-
-    # Set permissions for config file
-    try {
-        icacls $configFile /grant "Everyone:(OI)(CI)F" | Out-Null
-    } catch {
-        Write-Host "Warning: Failed to set config file permissions"
-    }
-
-    # Validate configuration
-    try {
-        $winlogbeatExe = Join-Path $InstallDir "winlogbeat.exe"
-        Write-Host "Validating configuration..."
-        
-        # Get version to use correct test command
-        $installedVersion = Get-WinlogbeatVersion
-        $majorVersion = [int]($installedVersion -split '\.')[0]
-        
-        # Change to installation directory for validation
-        $currentLocation = Get-Location
-        Set-Location $InstallDir
-        
-        try {
-            if ($majorVersion -lt 8) {
-                # For older versions
-                & ".\winlogbeat.exe" -configtest -c $configFile
-            } else {
-                # For version 8.x and above
-                & ".\winlogbeat.exe" test config -c $configFile
-            }
-            Write-Host "Winlogbeat configuration validated successfully"
-        } finally {
-            Set-Location $currentLocation
-        }
-    } catch {
-        Write-Host "Warning: Configuration validation failed, but proceeding anyway"
-    }
-}
-
-# Main logic
-if ($Install) {
-    if ($WinlogbeatVersion) {
-        Install-SpecificVersion $WinlogbeatVersion
-    } elseif ($InstallLatest) {
-        Install-LatestVersion
-    } else {
-        Write-Host "Error: Please specify either -v (version) or -l (latest) option"
-        Show-Help
-    }
-    
-    if ($AutomatedConfig) {
-        Set-Configuration
-    }
-    
-    if ($Start) {
-        Start-Winlogbeat
-    }
-    
-    Write-Host "`nInstallation completed successfully!"
-    Write-Host "Winlogbeat installed in: $InstallDir"
-    if ($AutomatedConfig) {
-        Write-Host "Configuration file: $ConfigDir\winlogbeat.yml"
-    }
-} else {
-    Show-Help
-}
+# If no options provided, show help
+if [ "$INSTALL" = false ] && [ "$AUTOMATED_CONFIG" = false ] && [ "$START" = false ]; then
+    show_help
+fi
