@@ -132,7 +132,7 @@ install_specific_version() {
     local minor_version=$(echo $version | cut -d'.' -f2)
     local admin_password=""
     
-    if [ "$major_version" -ge 2 ] && [ "$minor_version" -ge 12 ]; then
+    if ([ "$major_version" -ge 3 ]) || ([ "$major_version" -eq 2 ] && [ "$minor_version" -ge 12 ]); then
         # Require admin password for version 2.12 or higher
         while true; do
             read -s -p "Enter admin password for OpenSearch (minimum 8 characters): " admin_password
