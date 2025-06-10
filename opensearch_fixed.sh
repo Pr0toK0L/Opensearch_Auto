@@ -210,10 +210,10 @@ install_specific_version() {
     sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_DIR" 2>/dev/null || true
     sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_CONFIG_DIR" 2>/dev/null || true
     
-    sudo chmod 755 "$INSTALL_DIR"
-    sudo chmod 755 "$CONFIG_DIR"
-    sudo chmod 755 "$DASHBOARDS_DIR"
-    sudo chmod 755 "$DASHBOARDS_CONFIG_DIR"
+    sudo chmod 777 "$INSTALL_DIR"
+    sudo chmod 777 "$CONFIG_DIR"
+    sudo chmod 777 "$DASHBOARDS_DIR"
+    sudo chmod 777 "$DASHBOARDS_CONFIG_DIR"
     
     echo "OpenSearch $version has been installed successfully in $INSTALL_DIR, configuration in $CONFIG_DIR"
     if [ -n "$admin_password" ]; then
