@@ -17,6 +17,41 @@ $Start = $s
 $InstallDir = "C:\Program Files\Winlogbeat"
 $ConfigDir = "C:\ProgramData\Winlogbeat"
 
+function Get-WinlogbeatVersion {
+    try {
+        $winlogbeatExe = Join-Path $InstallDir "winlogbeat.exe"
+        if (-not (Test-Path $winlogbeatExe)) {
+            throw "winlogbeat.exe not found"
+        }
+        
+        # Change to installation directory
+        $currentLocation = Get-Location
+        Set-Location $InstallDir
+        
+        try {
+            # Get version information
+            $versionOutput = & ".\winlogbeat.exe" version 2>$null
+            if ($versionOutput -match 'winlogbeat version (\d+\.\d+\.\d+)') {
+                return $matches[1]
+            } else {
+                # Fallback: try to extract from file properties
+                $fileInfo = Get-ItemProperty -Path $winlogbeatExe
+                if ($fileInfo.VersionInfo.ProductVersion) {
+                    $version = $fileInfo.VersionInfo.ProductVersion -replace '[^\d\.].*$', ''
+                    return $version
+                } else {
+                    throw "Could not determine version"
+                }
+            }
+        } finally {
+            Set-Location $currentLocation
+        }
+    } catch {
+        Write-Host "Warning: Could not determine Winlogbeat version, assuming latest (>= 8.x)"
+        return "8.0.0"  # Default to newer version command
+    }
+}
+
 function Show-Help {
     Write-Host "Usage: .\Install-Winlogbeat.ps1 [-i] [-v version] [-l] [-a] [-s]"
     Write-Host "  -i : Install Winlogbeat"
@@ -179,24 +214,82 @@ function Start-Winlogbeat {
         $service = Get-Service -Name "winlogbeat" -ErrorAction SilentlyContinue
         if (-not $service) {
             Write-Host "Installing Winlogbeat as Windows service..."
-            $configFile = Join-Path $ConfigDir "winlogbeat.yml"
-            if (Test-Path $configFile) {
-                & "$winlogbeatExe" install-service winlogbeat --path.config="$ConfigDir"
-            } else {
-                & "$winlogbeatExe" install-service winlogbeat
+            
+            # Determine version to use correct install command
+            $installedVersion = Get-WinlogbeatVersion
+            $majorVersion = [int]($installedVersion -split '\.')[0]
+            
+            Write-Host "Detected Winlogbeat version: $installedVersion (Major: $majorVersion)"
+            
+            # Change to the installation directory
+            $currentLocation = Get-Location
+            Set-Location $InstallDir
+            
+            try {
+                $configFile = Join-Path $ConfigDir "winlogbeat.yml"
+                
+                if ($majorVersion -lt 8) {
+                    # Use old command for versions < 8.x
+                    Write-Host "Using legacy install command for version < 8.x"
+                    if (Test-Path $configFile) {
+                        Write-Host "Installing service with custom config: $configFile"
+                        & ".\winlogbeat.exe" install-service winlogbeat --path.config="$ConfigDir"
+                    } else {
+                        Write-Host "Installing service with default config"
+                        & ".\winlogbeat.exe" install-service winlogbeat
+                    }
+                } else {
+                    # Use new command for versions >= 8.x
+                    Write-Host "Using new install command for version >= 8.x"
+                    if (Test-Path $configFile) {
+                        Write-Host "Installing service with custom config: $configFile"
+                        & ".\winlogbeat.exe" install --path.config="$ConfigDir"
+                    } else {
+                        Write-Host "Installing service with default config"
+                        & ".\winlogbeat.exe" install
+                    }
+                }
+                
+                # Wait a moment for the service to be registered
+                Start-Sleep -Seconds 2
+                
+            } catch {
+                Write-Host "Error installing service: $_"
+                throw $_
+            } finally {
+                # Return to original location
+                Set-Location $currentLocation
             }
         }
         
+        # Verify service exists before starting
+        $service = Get-Service -Name "winlogbeat" -ErrorAction SilentlyContinue
+        if (-not $service) {
+            Write-Host "Error: Winlogbeat service was not installed properly"
+            exit 1
+        }
+        
         # Start the service
+        Write-Host "Starting Winlogbeat service..."
         Start-Service -Name "winlogbeat" -ErrorAction Stop
         Set-Service -Name "winlogbeat" -StartupType Automatic
         
+        # Wait a moment and check status
+        Start-Sleep -Seconds 3
         $serviceStatus = Get-Service -Name "winlogbeat" | Select-Object Name, Status, StartType
         Write-Host "Winlogbeat service status:"
         $serviceStatus | Format-Table -AutoSize
         
+        # Additional check for service health
+        if ($serviceStatus.Status -eq 'Running') {
+            Write-Host "✓ Winlogbeat service started successfully"
+        } else {
+            Write-Host "⚠ Warning: Winlogbeat service may not be running properly"
+        }
+        
     } catch {
         Write-Host "Error: Failed to start Winlogbeat service - $_"
+        Write-Host "You can try starting the service manually with: Start-Service -Name 'winlogbeat'"
         exit 1
     }
 }
@@ -265,8 +358,27 @@ path.logs: C:\ProgramData\Winlogbeat\logs
     try {
         $winlogbeatExe = Join-Path $InstallDir "winlogbeat.exe"
         Write-Host "Validating configuration..."
-        & "$winlogbeatExe" test config -c $configFile
-        Write-Host "Winlogbeat configuration validated successfully"
+        
+        # Get version to use correct test command
+        $installedVersion = Get-WinlogbeatVersion
+        $majorVersion = [int]($installedVersion -split '\.')[0]
+        
+        # Change to installation directory for validation
+        $currentLocation = Get-Location
+        Set-Location $InstallDir
+        
+        try {
+            if ($majorVersion -lt 8) {
+                # For older versions
+                & ".\winlogbeat.exe" -configtest -c $configFile
+            } else {
+                # For version 8.x and above
+                & ".\winlogbeat.exe" test config -c $configFile
+            }
+            Write-Host "Winlogbeat configuration validated successfully"
+        } finally {
+            Set-Location $currentLocation
+        }
     } catch {
         Write-Host "Warning: Configuration validation failed, but proceeding anyway"
     }
