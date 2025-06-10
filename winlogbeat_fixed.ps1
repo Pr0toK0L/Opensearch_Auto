@@ -228,9 +228,9 @@ function Start-Winlogbeat {
             try {
                 $configFile = Join-Path $ConfigDir "winlogbeat.yml"
                 
-                if ($majorVersion -lt 8) {
-                    # Use old command for versions < 8.x
-                    Write-Host "Using legacy install command for version < 8.x"
+                if ($majorVersion -lt 7) {
+                    # Use very old command for versions < 7.x
+                    Write-Host "Using legacy install command for version < 7.x"
                     if (Test-Path $configFile) {
                         Write-Host "Installing service with custom config: $configFile"
                         & ".\winlogbeat.exe" install-service winlogbeat --path.config="$ConfigDir"
@@ -239,8 +239,8 @@ function Start-Winlogbeat {
                         & ".\winlogbeat.exe" install-service winlogbeat
                     }
                 } else {
-                    # Use new command for versions >= 8.x
-                    Write-Host "Using new install command for version >= 8.x"
+                    # Use standard install command for versions >= 7.x (including 8.x, 9.x)
+                    Write-Host "Using standard install command for version >= 7.x"
                     if (Test-Path $configFile) {
                         Write-Host "Installing service with custom config: $configFile"
                         & ".\winlogbeat.exe" install --path.config="$ConfigDir"
@@ -250,8 +250,40 @@ function Start-Winlogbeat {
                     }
                 }
                 
+                # Check if install command was successful
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Install command failed with exit code: $LASTEXITCODE"
+                    # Try alternative methods
+                    Write-Host "Trying alternative installation methods..."
+                    
+                    # Method 1: Try with -E flag
+                    Write-Host "Trying: winlogbeat.exe install -E path.config=$ConfigDir"
+                    & ".\winlogbeat.exe" install -E "path.config=$ConfigDir"
+                    
+                    if ($LASTEXITCODE -ne 0) {
+                        # Method 2: Try PowerShell service creation
+                        Write-Host "Trying manual service creation..."
+                        $serviceName = "winlogbeat"
+                        $displayName = "Winlogbeat"
+                        $description = "Ship Windows Event Logs to Elasticsearch"
+                        $executablePath = "`"$winlogbeatExe`" -c `"$configFile`" --path.home `"$InstallDir`" --path.config `"$ConfigDir`" --path.data `"C:\ProgramData\Winlogbeat\data`" --path.logs `"C:\ProgramData\Winlogbeat\logs`""
+                        
+                        # Create the service using New-Service
+                        try {
+                            New-Service -Name $serviceName -BinaryPathName $executablePath -DisplayName $displayName -Description $description -StartupType Manual
+                            Write-Host "Service created successfully using PowerShell"
+                        } catch {
+                            Write-Host "PowerShell service creation also failed: $_"
+                            # Method 3: Use sc.exe as last resort
+                            Write-Host "Trying sc.exe as last resort..."
+                            $scResult = & sc.exe create $serviceName binPath= $executablePath DisplayName= $displayName start= demand
+                            Write-Host "sc.exe result: $scResult"
+                        }
+                    }
+                }
+                
                 # Wait a moment for the service to be registered
-                Start-Sleep -Seconds 2
+                Start-Sleep -Seconds 3
                 
             } catch {
                 Write-Host "Error installing service: $_"
