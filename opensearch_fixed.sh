@@ -170,12 +170,13 @@ install_specific_version() {
     
     echo "Installing OpenSearch..."
     if [ -n "$admin_password" ]; then
+        # Export the environment variable and use sudo -E to preserve it
         export OPENSEARCH_INITIAL_ADMIN_PASSWORD="$admin_password"
-        if ! sudo env OPENSEARCH_INITIAL_ADMIN_PASSWORD="$admin_password" dpkg -i "$temp_file"; then
+        if ! sudo -E dpkg -i "$temp_file"; then
             echo "Error: Failed to install OpenSearch"
             echo "Attempting to fix dependencies..."
             sudo apt-get install -f -y
-            sudo env OPENSEARCH_INITIAL_ADMIN_PASSWORD="$admin_password" dpkg -i "$temp_file"
+            sudo -E dpkg -i "$temp_file"
         fi
     else
         if ! sudo dpkg -i "$temp_file"; then
