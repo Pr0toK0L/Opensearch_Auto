@@ -302,50 +302,60 @@ function Set-Configuration {
         New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
     }
 
-    # Basic Winlogbeat configuration
+    # Basic Winlogbeat configuration - Fixed YAML content
     $configFile = Join-Path $ConfigDir "winlogbeat.yml"
-    $configContent = @"
-winlogbeat.event_logs:
-  - name: Application
-    ignore_older: 72h
+    
+    # Create YAML content as an array of strings to avoid parsing issues
+    $configLines = @(
+        "winlogbeat.event_logs:",
+        "  - name: Application",
+        "    ignore_older: 72h",
+        "",
+        "  - name: System",
+        "",
+        "  - name: Security",
+        "",
+        "  - name: Microsoft-Windows-Sysmon/Operational",
+        "",
+        "  - name: Microsoft-Windows-PowerShell/Operational",
+        "    event_id: 4103, 4104, 4105, 4106",
+        "",
+        "  - name: Windows PowerShell",
+        "    event_id: 400, 403, 600, 800",
+        "",
+        "  - name: ForwardedEvents",
+        "    tags: [forwarded]",
+        "",
+        "setup.template.settings:",
+        "  index.number_of_shards: 1",
+        "  #index.codec: best_compression",
+        "  #_source.enabled: false",
+        "",
+        "output.logstash:",
+        "  # The Logstash hosts",
+        "  hosts: [`"192.168.192.146:5044`"]",
+        "",
+        "processors:",
+        "  - add_host_metadata:",
+        "      when.not.contains.tags: forwarded",
+        "  - add_cloud_metadata: ~",
+        "",
+        "path.config: `${path.home}",
+        "path.data: C:\ProgramData\Winlogbeat\data",
+        "path.logs: C:\ProgramData\Winlogbeat\logs"
+    )
+    
+    # Join the lines with newlines
+    $configContent = $configLines -join "`r`n"
 
-  - name: System
-
-  - name: Security
-
-  - name: Microsoft-Windows-Sysmon/Operational
-
-  - name: Microsoft-Windows-PowerShell/Operational
-    event_id: 4103, 4104, 4105, 4106
-
-  - name: Windows PowerShell
-    event_id: 400, 403, 600, 800
-
-  - name: ForwardedEvents
-    tags: [forwarded]
-
-setup.template.settings:
-  index.number_of_shards: 1
-  #index.codec: best_compression
-  #_source.enabled: false
-
-output.logstash:
-  # The Logstash hosts
-  hosts: ["192.168.192.146:5044"]
-
-processors:
-  - add_host_metadata:
-      when.not.contains.tags: forwarded
-  - add_cloud_metadata: ~
-
-path.config: ${path.home}
-path.data: C:\ProgramData\Winlogbeat\data
-path.logs: C:\ProgramData\Winlogbeat\logs
-
-"@
-
-    Set-Content -Path $configFile -Value $configContent -Force -Encoding UTF8
-    Write-Host "Basic configuration written to $configFile"
+    # Write configuration to file
+    try {
+        Set-Content -Path $configFile -Value $configContent -Force -Encoding UTF8
+        Write-Host "Basic configuration written to $configFile"
+    } catch {
+        Write-Host "Error: Failed to write configuration file - $_"
+        exit 1
+    }
 
     # Set permissions for config file
     try {
