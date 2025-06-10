@@ -5,11 +5,13 @@
 # -v : version
 # -l : latest version
 # -a : automated config
+# -r : run services and show status
 
 OPENSEARCH_VERSION=""
 INSTALL=false
 INSTALL_LATEST=false
 AUTOMATED_CONFIG=false
+RUN_SERVICES=false
 
 validate_version() {
     local version=$1
@@ -34,15 +36,18 @@ validate_version() {
 }
 
 show_help() {
-    echo "Usage: $0 [-i] [-v VERSION] [-l] [-a]"
+    echo "Usage: $0 [-i] [-v VERSION] [-l] [-a] [-r]"
     echo "  -i : install"
     echo "  -v : version in format x.x.x, x in 0-99"
     echo "  -l : install latest version"
     echo "  -a : automated config"
+    echo "  -r : run services and show status"
     echo "Example:" 
     echo "$0 -i -l : install latest version with no config"
     echo "$0 -i -v 2.12.0 : install specific version"
     echo "$0 -a : configure OpenSearch and Dashboards"
+    echo "$0 -r : start services and show status"
+    echo "$0 -i -l -a -r : install latest, configure, and run"
 }
 
 check_root() {
@@ -59,8 +64,181 @@ check_sudo() {
     fi
 }
 
+check_services_installed() {
+    local opensearch_installed=false
+    local dashboards_installed=false
+    
+    if systemctl list-unit-files | grep -q "opensearch.service"; then
+        opensearch_installed=true
+    fi
+    
+    if systemctl list-unit-files | grep -q "opensearch-dashboards.service"; then
+        dashboards_installed=true
+    fi
+    
+    if [ "$opensearch_installed" = false ] || [ "$dashboards_installed" = false ]; then
+        echo "Error: OpenSearch services are not installed."
+        echo "Please install first using the -i option."
+        exit 1
+    fi
+}
+
+show_service_status() {
+    local service=$1
+    local service_name=$2
+    
+    echo "=== $service_name Status ==="
+    
+    if systemctl is-active --quiet "$service"; then
+        echo "Status: ✓ Running"
+        echo "Active: $(systemctl is-active "$service")"
+        echo "Enabled: $(systemctl is-enabled "$service" 2>/dev/null || echo "disabled")"
+        
+        # Get process info
+        local pid=$(systemctl show --property MainPID --value "$service" 2>/dev/null)
+        if [ "$pid" != "0" ] && [ -n "$pid" ]; then
+            echo "PID: $pid"
+            # Get memory usage
+            local memory=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{print int($1/1024)" MB"}')
+            if [ -n "$memory" ]; then
+                echo "Memory: $memory"
+            fi
+        fi
+        
+        # Show port information
+        if [ "$service" = "opensearch" ]; then
+            echo "Ports: 9200 (HTTP), 9300 (Transport)"
+            if netstat -tln 2>/dev/null | grep -q ":9200"; then
+                echo "Port 9200: ✓ Listening"
+            else
+                echo "Port 9200: ✗ Not listening"
+            fi
+        elif [ "$service" = "opensearch-dashboards" ]; then
+            echo "Port: 5601 (HTTP)"
+            if netstat -tln 2>/dev/null | grep -q ":5601"; then
+                echo "Port 5601: ✓ Listening"
+            else
+                echo "Port 5601: ✗ Not listening"
+            fi
+        fi
+    else
+        echo "Status: ✗ Not running"
+        echo "Active: $(systemctl is-active "$service")"
+        echo "Enabled: $(systemctl is-enabled "$service" 2>/dev/null || echo "disabled")"
+        
+        # Show recent logs if service failed
+        if systemctl is-failed --quiet "$service"; then
+            echo "Recent errors:"
+            journalctl -u "$service" --no-pager -n 3 --since "1 hour ago" 2>/dev/null | tail -n 3
+        fi
+    fi
+    echo ""
+}
+
+run_services() {
+    echo "Starting OpenSearch and OpenSearch Dashboards services..."
+    
+    # Check if services are installed
+    check_services_installed
+    
+    # Enable services for auto-start
+    echo "Enabling services for auto-start on boot..."
+    sudo systemctl enable opensearch
+    sudo systemctl enable opensearch-dashboards
+    
+    # Start OpenSearch first
+    echo "Starting OpenSearch..."
+    sudo systemctl start opensearch
+    
+    # Wait for OpenSearch to be ready
+    echo "Waiting for OpenSearch to start..."
+    local opensearch_ready=false
+    local attempts=0
+    local max_attempts=30
+    
+    while [ $attempts -lt $max_attempts ]; do
+        if systemctl is-active --quiet opensearch; then
+            # Check if port is listening
+            if netstat -tln 2>/dev/null | grep -q ":9200" || ss -tln 2>/dev/null | grep -q ":9200"; then
+                opensearch_ready=true
+                break
+            fi
+        fi
+        sleep 2
+        attempts=$((attempts + 1))
+        echo -n "."
+    done
+    echo ""
+    
+    if [ "$opensearch_ready" = true ]; then
+        echo "✓ OpenSearch started successfully"
+        
+        # Start OpenSearch Dashboards
+        echo "Starting OpenSearch Dashboards..."
+        sudo systemctl start opensearch-dashboards
+        
+        # Wait for Dashboards to be ready
+        echo "Waiting for OpenSearch Dashboards to start..."
+        local dashboards_ready=false
+        attempts=0
+        max_attempts=30
+        
+        while [ $attempts -lt $max_attempts ]; do
+            if systemctl is-active --quiet opensearch-dashboards; then
+                # Check if port is listening
+                if netstat -tln 2>/dev/null | grep -q ":5601" || ss -tln 2>/dev/null | grep -q ":5601"; then
+                    dashboards_ready=true
+                    break
+                fi
+            fi
+            sleep 2
+            attempts=$((attempts + 1))
+            echo -n "."
+        done
+        echo ""
+        
+        if [ "$dashboards_ready" = true ]; then
+            echo "✓ OpenSearch Dashboards started successfully"
+        else
+            echo "⚠ OpenSearch Dashboards may still be starting up"
+        fi
+    else
+        echo "✗ OpenSearch failed to start properly"
+        echo "Check logs with: sudo journalctl -u opensearch"
+    fi
+    
+    echo ""
+    echo "=== Services Status ==="
+    show_service_status "opensearch" "OpenSearch"
+    show_service_status "opensearch-dashboards" "OpenSearch Dashboards"
+    
+    echo "=== Access Information ==="
+    if systemctl is-active --quiet opensearch; then
+        echo "OpenSearch: https://localhost:9200"
+        echo "  - Health check: curl -k https://localhost:9200/_cluster/health"
+    fi
+    
+    if systemctl is-active --quiet opensearch-dashboards; then
+        echo "OpenSearch Dashboards: http://localhost:5601"
+    fi
+    
+    echo ""
+    echo "=== Useful Commands ==="
+    echo "Check logs:"
+    echo "  sudo journalctl -u opensearch -f"
+    echo "  sudo journalctl -u opensearch-dashboards -f"
+    echo ""
+    echo "Stop services:"
+    echo "  sudo systemctl stop opensearch"
+    echo "  sudo systemctl stop opensearch-dashboards"
+    echo ""
+    echo "Restart services:"
+    echo "  sudo systemctl restart opensearch"
+    echo "  sudo systemctl restart opensearch-dashboards"
+}
+
 # Get options menu
-while getopts ":iv:la" opt; do
+while getopts ":iv:lar" opt; do
     case ${opt} in
         i ) 
             INSTALL=true
@@ -85,6 +263,9 @@ while getopts ":iv:la" opt; do
         a ) 
             AUTOMATED_CONFIG=true
             ;;
+        r )
+            RUN_SERVICES=true
+            ;;
         \? )
             echo "Error: Invalid option -$OPTARG"
             show_help
@@ -106,8 +287,16 @@ if [ "$INSTALL" = false ] && [ "$AUTOMATED_CONFIG" = true ]; then
     fi
 fi
 
-# Check root privileges for installation
-if [ "$INSTALL" = true ]; then
+# Check if services are installed when using -r option
+if [ "$RUN_SERVICES" = true ] && [ "$INSTALL" = false ]; then
+    if ! systemctl list-unit-files | grep -q "opensearch.service"; then
+        echo "Error: OpenSearch is not installed. Use -i option to install first."
+        exit 1
+    fi
+fi
+
+# Check root privileges for installation and running services
+if [ "$INSTALL" = true ] || [ "$RUN_SERVICES" = true ]; then
     check_root
 fi
 
@@ -286,6 +475,7 @@ EOF
     echo "- Run with -a flag for automated configuration"
     echo "- Or configure manually before starting services"
     echo "- Start services manually with: sudo systemctl start opensearch && sudo systemctl start opensearch-dashboards"
+    echo "- Or use -r flag to auto-start services"
 }
 
 install_latest_version() {
@@ -513,6 +703,8 @@ EOF
     echo "To enable auto-start on boot:"
     echo "sudo systemctl enable opensearch"
     echo "sudo systemctl enable opensearch-dashboards"
+    echo ""
+    echo "Or use the -r flag to auto-start services"
 }
 
 # Main execution logic
@@ -532,7 +724,11 @@ if [ "$AUTOMATED_CONFIG" = true ]; then
     automated_config
 fi
 
+if [ "$RUN_SERVICES" = true ]; then
+    run_services
+fi
+
 # If no options provided, show help
-if [ "$INSTALL" = false ] && [ "$AUTOMATED_CONFIG" = false ]; then
+if [ "$INSTALL" = false ] && [ "$AUTOMATED_CONFIG" = false ] && [ "$RUN_SERVICES" = false ]; then
     show_help
 fi

@@ -130,12 +130,12 @@ install_specific_version() {
     if ([ "$major_version" -ge 3 ]) || ([ "$major_version" -eq 2 ] && [ "$minor_version" -ge 12 ]); then
         # Require admin password for version 2.12 or higher
         while true; do
-            read -s -p "Enter admin password for OpenSearch (minimum 8 characters): " admin_password
+            read -s -p "Enter admin password for OpenSearch (minimum 12 characters): " admin_password
             echo
-            if [ ${#admin_password} -ge 8 ]; then
+            if [ ${#admin_password} -ge 12 ]; then
                 break
             else
-                echo "Password must be at least 8 characters long. Please try again."
+                echo "Password must be at least 12 characters long. Please try again."
             fi
         done
     fi
@@ -228,15 +228,15 @@ install_specific_version() {
     sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_DIR" 2>/dev/null || true
     sudo chown -R opensearch-dashboards:opensearch-dashboards "$DASHBOARDS_CONFIG_DIR" 2>/dev/null || true
     
-    sudo chmod 777 "$INSTALL_DIR"
-    sudo chmod 777 "$CONFIG_DIR"
-    sudo chmod 777 "/var/log/opensearch"
-    sudo chmod 777 "/var/lib/opensearch"
-    sudo chmod 777 "$DASHBOARDS_DIR"
-    sudo chmod 777 "$DASHBOARDS_CONFIG_DIR"
+    sudo chmod 755 "$INSTALL_DIR"
+    sudo chmod 755 "$CONFIG_DIR"
+    sudo chmod 755 "/var/log/opensearch"
+    sudo chmod 755 "/var/lib/opensearch"
+    sudo chmod 755 "$DASHBOARDS_DIR"
+    sudo chmod 755 "$DASHBOARDS_CONFIG_DIR"
     
-    # Fix installation issues inline
-    echo "Applying installation fixes..."
+    # Basic fixes only - just environment and essential fixes
+    echo "Applying basic installation fixes..."
     
     # Fix Java environment
     local java_home
@@ -253,7 +253,7 @@ install_specific_version() {
         java_home="/usr/lib/jvm/java-17-openjdk-amd64"
     fi
     
-    # Create environment file
+    # Create environment file - this is the main fix needed
     sudo tee /etc/default/opensearch > /dev/null << EOF
 OPENSEARCH_JAVA_HOME=$java_home
 OPENSEARCH_PATH_CONF=/etc/opensearch
@@ -261,107 +261,20 @@ ES_PATH_CONF=/etc/opensearch
 OPENSEARCH_HOME=/usr/share/opensearch
 EOF
     
-    # Fix systemd service file
-    if [ -f "/lib/systemd/system/opensearch.service" ]; then
-        sudo cp /lib/systemd/system/opensearch.service /lib/systemd/system/opensearch.service.bak
-        
-        sudo tee /lib/systemd/system/opensearch.service > /dev/null << 'EOF'
-[Unit]
-Description=OpenSearch
-Documentation=https://opensearch.org/
-Wants=network-online.target
-After=network-online.target
-ConditionFileNotEmpty=/etc/opensearch/opensearch.yml
-
-[Service]
-RuntimeDirectory=opensearch
-PrivateTmp=true
-Environment=OPENSEARCH_HOME=/usr/share/opensearch
-Environment=OPENSEARCH_PATH_CONF=/etc/opensearch
-Environment=PID_DIR=/var/run/opensearch
-Environment=ES_PATH_CONF=/etc/opensearch
-EnvironmentFile=-/etc/default/opensearch
-WorkingDirectory=/usr/share/opensearch
-User=opensearch
-Group=opensearch
-ExecStart=/usr/share/opensearch/bin/opensearch
-StandardOutput=journal
-StandardError=inherit
-SyslogIdentifier=opensearch
-LimitNOFILE=65535
-LimitNPROC=4096
-LimitAS=infinity
-LimitFSIZE=infinity
-TimeoutStopSec=0
-KillSignal=SIGTERM
-KillMode=process
-SendSIGKILL=no
-SuccessExitStatus=143
-TimeoutStartSec=180
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    fi
-    
-    # Fix JVM options - only fix GC logging path, keep existing heap settings
+    # Only fix GC logging if needed
     if [ -f "$CONFIG_DIR/jvm.options" ]; then
-        # Backup original jvm.options
-        sudo cp "$CONFIG_DIR/jvm.options" "$CONFIG_DIR/jvm.options.original"
-        
-        # Fix GC logging path from absolute to relative
-        sudo sed -i 's|-Xlog:gc\*,gc+age=trace,safepoint:file=/var/log/opensearch/gc.log|-Xlog:gc*,gc+age=trace,safepoint:gc.log|g' "$CONFIG_DIR/jvm.options"
-        
-        echo "Fixed GC logging path in jvm.options"
+        # Check if absolute path exists in GC logging
+        if grep -q "/var/log/opensearch/gc.log" "$CONFIG_DIR/jvm.options" 2>/dev/null; then
+            sudo cp "$CONFIG_DIR/jvm.options" "$CONFIG_DIR/jvm.options.original"
+            sudo sed -i 's|-Xlog:gc\*,gc+age=trace,safepoint:file=/var/log/opensearch/gc.log|-Xlog:gc*,gc+age=trace,safepoint:gc.log|g' "$CONFIG_DIR/jvm.options"
+            echo "Fixed GC logging path in jvm.options"
+        fi
     fi
     
-    # Reload systemd
+    # Reload systemd to pick up environment changes
     sudo systemctl daemon-reload
-    sudo systemctl reset-failed opensearch 2>/dev/null || true
     
-    # Make sure opensearch script is executable
-    sudo chmod +x /usr/share/opensearch/bin/opensearch
-    
-    # Fix OpenSearch Dashboards systemd service if exists
-    if [ -f "/lib/systemd/system/opensearch-dashboards.service" ]; then
-        sudo cp /lib/systemd/system/opensearch-dashboards.service /lib/systemd/system/opensearch-dashboards.service.bak
-        
-        sudo tee /lib/systemd/system/opensearch-dashboards.service > /dev/null << 'EOF'
-[Unit]
-Description=OpenSearch Dashboards
-Documentation=https://opensearch.org/
-Wants=network-online.target
-After=network-online.target opensearch.service
-ConditionFileNotEmpty=/etc/opensearch-dashboards/opensearch_dashboards.yml
-
-[Service]
-RuntimeDirectory=opensearch-dashboards
-PrivateTmp=true
-Environment=NODE_OPTIONS="--max-old-space-size=4096"
-WorkingDirectory=/usr/share/opensearch-dashboards
-User=opensearch-dashboards
-Group=opensearch-dashboards
-ExecStart=/usr/share/opensearch-dashboards/bin/opensearch-dashboards
-StandardOutput=journal
-StandardError=inherit
-SyslogIdentifier=opensearch-dashboards
-LimitNOFILE=65535
-LimitNPROC=4096
-TimeoutStopSec=0
-KillSignal=SIGTERM
-KillMode=process
-SendSIGKILL=no
-TimeoutStartSec=300
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        # Make sure opensearch-dashboards script is executable
-        sudo chmod +x /usr/share/opensearch-dashboards/bin/opensearch-dashboards
-    fi
-    
-    echo "Installation fixes applied successfully"
+    echo "Basic installation fixes applied"
     
     echo "OpenSearch $version has been installed successfully in $INSTALL_DIR, configuration in $CONFIG_DIR"
     if [ -n "$admin_password" ]; then
@@ -498,20 +411,19 @@ EOF
     # Configure internal users
     echo "Configuring OpenSearch users and roles..."
     
-    # Get admin password for OpenSearch Dashboards config
-    local admin_password
-    while true; do
-        read -s -p "Enter admin password for OpenSearch (minimum 8 characters): " admin_password
-        echo
-        if [ ${#admin_password} -ge 8 ]; then
-            break
-        else
-            echo "Password must be at least 8 characters long. Please try again."
-        fi
-    done
-    
     if [ -d "$INSTALL_DIR/plugins/opensearch-security/tools" ]; then
         cd "$INSTALL_DIR/plugins/opensearch-security/tools"
+        
+        local admin_password
+        while true; do
+            read -s -p "Enter new admin password (minimum 12 characters): " admin_password
+            echo
+            if [ ${#admin_password} -ge 12 ]; then
+                break
+            else
+                echo "Password must be at least 12 characters long. Please try again."
+            fi
+        done
         
         # Generate password hash
         local admin_hash
@@ -553,7 +465,7 @@ EOF
         sudo cp "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml" "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml.bak"
     fi
     
-    # Use the same password that was set for admin user
+    # Use the admin password that was just set
     sudo tee "$DASHBOARDS_CONFIG_DIR/opensearch_dashboards.yml" > /dev/null << EOF
 # Server Configuration
 server.host: 0.0.0.0
@@ -590,6 +502,7 @@ EOF
     echo "- OpenSearch will be available at: https://localhost:9200"
     echo "- OpenSearch Dashboards will be available at: http://localhost:5601"
     echo "- Admin credentials: admin/$admin_password"
+    echo "- Custom user credentials: user/$admin_password"
     echo "- SSL certificates have been generated in $CONFIG_DIR"
     echo "- Configuration backups have been created with .bak extension"
     echo ""
